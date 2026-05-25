@@ -80,6 +80,8 @@ jobs:
               { if ($2 != $4) { print "  DIVERGE no tick " $1 ": " $2 " (MSVC) vs " $4 " (Clang)"; bad=1; exit } }
               END { if (!bad) print "  MATCH: " NR " ticks idênticos bit-a-bit" }'
           }
+          # Defensivo: normaliza CRLF->LF (artefato do Windows pode vir com \r).
+          find artifacts -name 'hash_*.txt' -exec sed -i 's/\r$//' {} +
           verdict_file hash_strict_th4.txt; S4=$?
           STRICT4=$(paste artifacts/hashes-win-msvc/hash_strict_th4.txt artifacts/hashes-linux-clang/hash_strict_th4.txt | awk -F'\t' 'BEGIN{m=1} {if($2!=$4){m=0}} END{print m}')
           verdict_file hash_strict_th1.txt

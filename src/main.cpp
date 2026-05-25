@@ -261,7 +261,7 @@ static int CmdInfo() {
 static int CmdRun(const Args &a) {
     auto h = Simulate(a);
     FILE *f = stdout;
-    if (!a.out.empty()) f = std::fopen(a.out.c_str(), "w");
+    if (!a.out.empty()) f = std::fopen(a.out.c_str(), "wb");  // binário: LF em todo OS
     for (size_t t = 0; t < h.size(); ++t)
         std::fprintf(f, "%zu\t%016llx\n", t, (unsigned long long)h[t]);
     if (f != stdout) std::fclose(f);
