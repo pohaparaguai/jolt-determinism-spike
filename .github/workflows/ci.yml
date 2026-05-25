@@ -1,0 +1,104 @@
+name: jolt-determinism
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-run:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: win-msvc
+          - os: ubuntu-latest
+            name: linux-clang
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang + ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang ninja-build
+
+      - name: Configure (Windows / MSVC)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build
+
+      - name: Configure (Linux / Clang)
+        if: runner.os == 'Linux'
+        run: cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --target t2
+
+      - name: Run harness (info / sanity / hash logs)
+        shell: bash
+        run: |
+          set -e
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN=build/Release/t2.exe; else BIN=build/t2; fi
+          echo "::group::F0 info"
+          "$BIN" info
+          echo "::endgroup::"
+          echo "::group::C2 replay (same-platform determinism)"
+          "$BIN" replay --ticks 600 --threads 4 --mode strict
+          echo "::endgroup::"
+          echo "::group::C3 rollback"
+          "$BIN" rollback --ticks 600 --at 100 --resim 64 --threads 4 --mode strict
+          echo "::endgroup::"
+          # Logs de hash para a comparação cross-platform (C1). Params IDÊNTICOS nos dois OS.
+          "$BIN" run --ticks 2000 --bodies 16 --threads 4 --mode strict             --out hash_strict_th4.txt
+          "$BIN" run --ticks 2000 --bodies 16 --threads 1 --mode strict             --out hash_strict_th1.txt
+          "$BIN" run --ticks 2000 --bodies 16 --threads 4 --mode quant --quantum 1e-3 --out hash_quant_th4.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hashes-${{ matrix.name }}
+          path: hash_*.txt
+
+  compare:
+    needs: build-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Compare MSVC vs Clang (cross-platform verdict C1)
+        shell: bash
+        run: |
+          verdict_file() {
+            local f="$1"
+            local A="artifacts/hashes-win-msvc/$f"
+            local B="artifacts/hashes-linux-clang/$f"
+            echo "=================================================="
+            echo "### $f  (MSVC vs Clang)"
+            if [ ! -f "$A" ] || [ ! -f "$B" ]; then echo "MISSING artifact"; return 2; fi
+            # Primeira divergência por tick (formato: tick<TAB>hash).
+            paste "$A" "$B" | awk -F'\t' '
+              { if ($2 != $4) { print "  DIVERGE no tick " $1 ": " $2 " (MSVC) vs " $4 " (Clang)"; bad=1; exit } }
+              END { if (!bad) print "  MATCH: " NR " ticks idênticos bit-a-bit" }'
+          }
+          verdict_file hash_strict_th4.txt; S4=$?
+          STRICT4=$(paste artifacts/hashes-win-msvc/hash_strict_th4.txt artifacts/hashes-linux-clang/hash_strict_th4.txt | awk -F'\t' 'BEGIN{m=1} {if($2!=$4){m=0}} END{print m}')
+          verdict_file hash_strict_th1.txt
+          STRICT1=$(paste artifacts/hashes-win-msvc/hash_strict_th1.txt artifacts/hashes-linux-clang/hash_strict_th1.txt | awk -F'\t' 'BEGIN{m=1} {if($2!=$4){m=0}} END{print m}')
+          verdict_file hash_quant_th4.txt
+          QUANT4=$(paste artifacts/hashes-win-msvc/hash_quant_th4.txt artifacts/hashes-linux-clang/hash_quant_th4.txt | awk -F'\t' 'BEGIN{m=1} {if($2!=$4){m=0}} END{print m}')
+
+          echo ""
+          echo "########## VEREDITO C1 ##########"
+          echo "strict, 4 threads : $([ "$STRICT4" = 1 ] && echo MATCH || echo DIVERGE)"
+          echo "strict, 1 thread  : $([ "$STRICT1" = 1 ] && echo MATCH || echo DIVERGE)"
+          echo "quant 1e-3, 4 thr : $([ "$QUANT4" = 1 ] && echo MATCH || echo DIVERGE)"
+          echo "================================="
+          if [ "$STRICT4" = 1 ] || [ "$STRICT1" = 1 ]; then
+            echo "==> GREEN: determinismo cross-platform bit-a-bit confirmado. Predição/rollback viáveis."
+          elif [ "$QUANT4" = 1 ]; then
+            echo "==> YELLOW: bit-a-bit diverge mas quantizado bate -> predição viável com soft-reconciliation."
+            exit 1
+          else
+            echo "==> RED: diverge em strict E quant -> acionar Planos B (fixar FP / clang-cl / lockstep)."
+            exit 1
+          fi
