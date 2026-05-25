@@ -1,4 +1,3 @@
 build/
 hashlogs/
-*.txt
-!README.md
+hash_*.txt
